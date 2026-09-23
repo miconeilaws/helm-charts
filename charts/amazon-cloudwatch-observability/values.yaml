@@ -807,6 +807,9 @@ agent:
     targetAllocator:
       enabled: false
       image:
+        ## When otelPrometheusMonitor.enabled is true, this Target Allocator image
+        ## MUST support prometheusCR discovery + per-node + the scraper_role config key,
+        ## pinned together with a matching operator image; an older image CrashLoopBackOffs.
         repository: cloudwatch-agent-target-allocator
         tag: 1.0.0
         repositoryDomainMap:
@@ -1169,6 +1172,34 @@ applicationSignals:
   enabled: true
   ## The agent in the agents array that receives Application Signals config.
   targetAgent: "cloudwatch-agent"
+
+## Scrapes the targets selected by ServiceMonitor and PodMonitor objects
+## (monitoring.coreos.com/v1) and sends the metrics to CloudWatch over OTLP, with
+## cloudwatch.solution k8s-otel-prometheus-monitors. Works with or without
+## otelContainerInsights. The per-node agent (otelContainerInsights.targetAgent)
+## scrapes each target on its own node; monitors annotated
+## cloudwatch.aws.amazon.com/scraper: cluster-scraper go to the cluster-scraper agent
+## (otelContainerInsights.clusterScraperAgent) instead.
+##
+## ServiceMonitor/PodMonitor CRDs: this chart does not install them. When enabled, the
+## operator runs with --manage-prometheus-crds and creates both CRDs (prometheus-operator
+## v0.92.0 schema) only if they do not exist. A copy installed by prometheus-operator,
+## kube-prometheus-stack, Argo CD or kubectl is left unchanged. The operator never
+## deletes the CRDs and does not set an owner reference, so uninstalling this chart or
+## the EKS add-on leaves the CRDs, and every ServiceMonitor/PodMonitor, in place. To
+## remove them after uninstalling:
+##   kubectl delete crd servicemonitors.monitoring.coreos.com podmonitors.monitoring.coreos.com
+## (this also deletes every ServiceMonitor and PodMonitor in the cluster).
+##
+## IMAGE PREREQUISITE: this drives the Target Allocator with prometheusCR discovery, the
+## per-node allocation strategy and a scraper_role config key, and passes
+## --manage-prometheus-crds to the operator. The pinned Target Allocator image
+## (agent.prometheus.targetAllocator.image, default cloudwatch-agent-target-allocator:1.0.0)
+## AND the operator image must both be builds that support these; an older image
+## CrashLoopBackOffs on boot rather than degrading. enabled defaults to false until
+## operator and Target Allocator images with this support are released.
+otelPrometheusMonitor:
+  enabled: false
 
 ## Controls the OTLP-based Container Insights pipeline (node-exporter, kube-state-metrics, cluster-scraper, OTEL collector config).
 ## When enabled, deploys additional resources and injects OTEL config into the CloudWatch Agent for metrics collection via OTLP.

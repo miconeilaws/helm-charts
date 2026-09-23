@@ -84,6 +84,26 @@ receivers:
               target_label: node
 {{- end }}
 
+{{- if dig "enabled" false (.Values.otelPrometheusMonitor | default dict) }}
+  # otelPrometheusMonitor: when otelContainerInsights is off, cloudwatch-agent.prometheus-monitor-config
+  # keeps only the metrics/cw_k8s_ci_v0_prometheuscr pipeline and the components it lists, so
+  # every component that pipeline uses must be defined in this template.
+  # ServiceMonitor/PodMonitor scraping routed to the cluster-scraper via the
+  # cloudwatch.aws.amazon.com/scraper: cluster-scraper annotation. This agent's Target Allocator serves the
+  # routed scrape jobs (consistent-hashing across the cluster-scraper replicas); this receiver
+  # pulls this collector's assigned shard. Requires the Target Allocator + prometheusCR to be
+  # enabled for the clusterScraperAgent and the POD_NAME env (set below).
+  prometheus/cw_k8s_ci_v0_prometheuscr:
+    target_allocator:
+      endpoint: https://{{ .Values.otelContainerInsights.clusterScraperAgent }}-target-allocator-service:80
+      interval: {{ .Values.otelContainerInsights.metricResolution }}
+      collector_id: ${env:POD_NAME}
+      tls:
+        ca_file: /etc/amazon-cloudwatch-observability-agent-cert/tls-ca.crt
+        cert_file: /etc/amazon-cloudwatch-observability-agent-ta-client-cert/client.crt
+        key_file: /etc/amazon-cloudwatch-observability-agent-ta-client-cert/client.key
+{{- end }}
+
 {{- if and .Values.otelContainerInsights.solutions.enabled .Values.otelContainerInsights.solutions.karpenter.enabled }}
   prometheus/cw_k8s_ci_v0_karpenter:
     config:
@@ -376,6 +396,18 @@ processors:
         cloud.availability_zone: { enabled: false }
         cloud.account.id: { enabled: true }
     {{- end }}
+{{- end }}
+
+{{- if dig "enabled" false (.Values.otelPrometheusMonitor | default dict) }}
+  transform/cw_k8s_ci_v0_set_scope_prometheuscr:
+    error_mode: ignore
+    metric_statements:
+      - context: scope
+        statements:
+          - set(scope.schema_url, "")
+          - set(attributes["cloudwatch.source"], "cloudwatch-agent")
+          - set(attributes["cloudwatch.solution"], "k8s-otel-prometheus-monitors")
+          - set(attributes["cloudwatch.pipeline"], "prometheus-monitors")
 {{- end }}
 
 {{- if and .Values.otelContainerInsights.solutions.enabled .Values.otelContainerInsights.solutions.karpenter.enabled }}
@@ -1079,6 +1111,26 @@ service:
         {{- if include "otel-container-insights.metricNamesFilterEnabled" . }}
         - filter/cw_k8s_ci_v0_metric_names
         {{- end }}
+        - batch/cw_k8s_ci_v0_cwotel
+      exporters:
+        - otlphttp/cw_k8s_ci_v0_cwotel
+{{- end }}
+
+{{- if dig "enabled" false (.Values.otelPrometheusMonitor | default dict) }}
+    metrics/cw_k8s_ci_v0_prometheuscr:
+      receivers: [prometheus/cw_k8s_ci_v0_prometheuscr]
+      # Central scraper: no per-node (set_node_name/promote_node_name) enrichment, since a
+      # single/few consistent-hashing replicas serve the routed monitors (not node-local).
+      processors:
+        - filter/cw_k8s_ci_v0_scrape_metadata
+        - transform/cw_k8s_ci_v0_set_unit
+        - metricstarttime/cw_k8s_ci_v0
+        - transform/cw_k8s_ci_v0_set_scope_prometheuscr
+        - transform/cw_k8s_ci_v0_set_cluster_name
+        - resourcedetection/cw_k8s_ci_v0
+        - transform/cw_k8s_ci_v0_set_cloud_resource_id
+        - transform/cw_k8s_ci_v0_clear_schema_url
+        - awsattributelimit/cw_k8s_ci_v0
         - batch/cw_k8s_ci_v0_cwotel
       exporters:
         - otlphttp/cw_k8s_ci_v0_cwotel

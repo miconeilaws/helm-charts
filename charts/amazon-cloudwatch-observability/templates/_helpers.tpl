@@ -5,6 +5,18 @@ Expand the name of the chart.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/*
+Whether the operator creates the ServiceMonitor/PodMonitor CRDs when they are missing
+(operator flag --manage-prometheus-crds, plus the matching operator RBAC). True when
+otelPrometheusMonitor.enabled. The chart itself never renders these CRDs.
+Returns "true" or empty.
+*/}}
+{{- define "amazon-cloudwatch-observability.managePrometheusCRDs" -}}
+{{- if dig "enabled" false (.Values.otelPrometheusMonitor | default dict) -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "amazon-cloudwatch-observability.common.tolerations" -}}
 {{- $tolerations := .context.Values.tolerations }}
 {{- if .component }}
@@ -345,14 +357,89 @@ Logic:
 {{- $agentName := .agentName -}}
 {{- $ctx := .context -}}
 {{- include "cloudwatch-agent.validate-flags" $ctx -}}
-{{- if not $ctx.Values.otelContainerInsights.enabled -}}
-{}
-{{- else if eq $ctx.Values.otelContainerInsights.targetAgent $agentName -}}
-{{- include "otel-container-insights.config" $ctx -}}
-{{- else if eq $ctx.Values.otelContainerInsights.clusterScraperAgent $agentName -}}
-{{- include "otel-container-insights-cluster-scraper.config" $ctx -}}
+{{- $ciOn := $ctx.Values.otelContainerInsights.enabled -}}
+{{- $monitorOn := eq (include "cloudwatch-agent.prometheusMonitorEnabled" (dict "agentName" $agentName "context" $ctx)) "true" -}}
+{{- $isTarget := eq $ctx.Values.otelContainerInsights.targetAgent $agentName -}}
+{{- $isScraper := eq $ctx.Values.otelContainerInsights.clusterScraperAgent $agentName -}}
+{{- $full := "" -}}
+{{- if $isTarget -}}
+{{- $full = include "otel-container-insights.config" $ctx -}}
+{{- else if $isScraper -}}
+{{- $full = include "otel-container-insights-cluster-scraper.config" $ctx -}}
+{{- end -}}
+{{- if and $ciOn $full -}}
+{{- $full -}}
+{{- else if $monitorOn -}}
+{{- include "cloudwatch-agent.prometheus-monitor-config" (dict "config" $full) -}}
 {{- else -}}
 {}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The OTEL config for ServiceMonitor/PodMonitor scraping alone, for an agent whose
+otelContainerInsights config is off. It is cut from that agent's full otelContainerInsights
+config, which defines the metrics/cw_k8s_ci_v0_prometheuscr pipeline whenever
+otelPrometheusMonitor.enabled is true: the pipeline, the receivers, processors and
+exporters it lists, the extensions those exporters authenticate with, and
+service.telemetry. Taking the components from the same template keeps the definitions
+identical whether or not otelContainerInsights is on, and no other otelContainerInsights
+pipeline renders. Accepts a dict with "config" (the rendered full config, a string).
+*/}}
+{{- define "cloudwatch-agent.prometheus-monitor-config" -}}
+{{- $pipelineName := "metrics/cw_k8s_ci_v0_prometheuscr" -}}
+{{- $full := fromYaml .config -}}
+{{- if hasKey $full "Error" -}}
+{{- fail (printf "Failed to parse the otelContainerInsights config: %s" (index $full "Error")) -}}
+{{- end -}}
+{{- $pipeline := dig "service" "pipelines" $pipelineName dict $full -}}
+{{- if not $pipeline -}}
+{{- fail (printf "otelPrometheusMonitor: the otelContainerInsights config has no %s pipeline" $pipelineName) -}}
+{{- end -}}
+{{- $out := dict "receivers" dict "processors" dict "exporters" dict "extensions" dict -}}
+{{- range $section := list "receivers" "processors" "exporters" -}}
+{{- range $name := (get $pipeline $section | default list) -}}
+{{- if not (hasKey (get $full $section | default dict) $name) -}}
+{{- fail (printf "otelPrometheusMonitor: %s %s is not defined" $section $name) -}}
+{{- end -}}
+{{- $_ := set (get $out $section) $name (index (get $full $section) $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $extensions := list -}}
+{{- range $name, $exporter := (get $out "exporters") -}}
+{{- $auth := dig "auth" "authenticator" "" ($exporter | default dict) -}}
+{{- if $auth -}}
+{{- $_ := set (get $out "extensions") $auth (dig "extensions" $auth dict $full) -}}
+{{- $extensions = append $extensions $auth -}}
+{{- end -}}
+{{- end -}}
+{{- $service := dict "pipelines" (dict $pipelineName $pipeline) -}}
+{{- if $extensions -}}
+{{- $_ := set $service "extensions" ($extensions | uniq) -}}
+{{- end -}}
+{{- with (dig "service" "telemetry" nil $full) -}}
+{{- $_ := set $service "telemetry" . -}}
+{{- end -}}
+{{- $_ := set $out "service" $service -}}
+{{- if not (get $out "extensions") -}}
+{{- $_ := unset $out "extensions" -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end -}}
+
+{{/*
+Returns "true" when ServiceMonitor/PodMonitor scraping applies to the given agent: when
+otelPrometheusMonitor.enabled is true and the agent is either otelContainerInsights.targetAgent
+(per-node scraping of unrouted monitors) or otelContainerInsights.clusterScraperAgent (central
+scraping of monitors routed with cloudwatch.aws.amazon.com/scraper: cluster-scraper). It does
+not depend on otelContainerInsights.enabled.
+Accepts a dict with "agentName" (string) and "context" (root context $).
+*/}}
+{{- define "cloudwatch-agent.prometheusMonitorEnabled" -}}
+{{- $ctx := .context -}}
+{{- $agentName := .agentName -}}
+{{- if and (dig "enabled" false ($ctx.Values.otelPrometheusMonitor | default dict)) (or (eq $agentName $ctx.Values.otelContainerInsights.targetAgent) (eq $agentName $ctx.Values.otelContainerInsights.clusterScraperAgent)) -}}
+true
 {{- end -}}
 {{- end -}}
 
